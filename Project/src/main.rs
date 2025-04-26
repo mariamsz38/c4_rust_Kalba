@@ -84,6 +84,256 @@ impl Compiler {
     }
 
 // PUT YOUR CODE HERE
+    /// Advances the compiler to the next token in the source code, performing lexical analysis.
+    /// Updates the current token (`self.tk`), position (`self.p`), and related state.
+    fn next(&mut self) {
+        while let Some(ch) = self.src[self.p..].chars().next() {   
+            self.p += ch.len_utf8(); // Advance position by the UTF-8 length of the current character
+            self.tk = Some(match ch { // Match on the current character to determine the token type
+                '\n' => { // Handle newline: update line number, optionally print source line for debugging
+                    if self.src_flag { 
+                        println!("{}: {}", self.line, &self.src[self.lp..self.p]);  // Print the current line for debugging if source flag is enabled
+                        self.lp = self.p; // Update last position
+                        // Process execution buffer for debugging
+                        while self.le < self.e.len() && self.e[self.le] != 0 { 
+                            self.le += 1;
+                            let op = self.e[self.le - 1];
+                            // Map operation code to string for debug output
+                            let op_str = match op {
+                                0 => "LEA", 1 => "IMM", 2 => "JMP", 3 => "JSR", 4 => "BZ", 5 => "BNZ",
+                                6 => "ENT", 7 => "ADJ", 8 => "LEV", 9 => "LI", 10 => "LC", 11 => "SI",
+                                12 => "SC", 13 => "PSH", 14 => "OR", 15 => "XOR", 16 => "AND", 17 => "EQ",
+                                18 => "NE", 19 => "LT", 20 => "GT", 21 => "LE", 22 => "GE", 23 => "SHL",
+                                24 => "SHR", 25 => "ADD", 26 => "SUB", 27 => "MUL", 28 => "DIV", 29 => "MOD",
+                                30 => "OPEN", 31 => "READ", 32 => "CLOS", 33 => "PRTF", 34 => "MALC",
+                                35 => "FREE", 36 => "MSET", 37 => "MCMP", 38 => "EXIT", _ => "???",
+                            };
+                            print!("{:8}", op_str); // Print operand for certain operations
+                            if op <= 7 { self.le += 1; println!(" {}", self.e[self.le - 1]); } else { println!(); }
+                        }
+                    }
+                    self.line += 1; // Increment line number
+                    continue; // Skip to next character
+                }
+                '#' => {
+                    while self.p < self.src.len() && self.src[self.p..].chars().next() != Some('\n') {
+                        self.p += 1;
+                    }
+                    continue;
+                }
+                'a'..='z' | 'A'..='Z' | '_' => { // Handle identifiers (letters or underscore)
+                    let start = self.p - ch.len_utf8(); // Mark start of identifier
+                    let mut tk = ch as Int;  // Initialize hash with first character
+                    while let Some(c) = self.src[self.p..].chars().next() { // Process subsequent alphanumeric or underscore characters
+                        if c.is_alphanumeric() || c == '_' {
+                            tk = tk * 147 + c as Int; // Update hash
+                            self.p += c.len_utf8();
+                        } else { break; }
+                    }
+                    tk = (tk << 6) + (self.p - start) as Int; // Finalize hash
+                    let name = self.src[start..self.p].to_string(); // Extract identifier name
+                    // Check if identifier exists in symbol table
+                    for id in &self.sym {
+                        if tk == id.hash && id.name == name {
+                            self.tk = Some(id.tk); // Reuse existing token
+                            return;
+                        }
+                    } 
+                    // Create new identifier and add to symbol table
+                    let id = Ident {
+                        tk: Token::Id, hash: tk, name,
+                        class: Token::Id, ty: Type::INT, val: 0,
+                        hclass: Token::Id, hty: Type::INT, hval: 0,
+                    };
+                    self.sym.push(id);
+                    Token::Id // Return identifier token
+                }
+                // Handle numeric literals
+                '0'..='9' => {
+                    self.ival = ch as Int - '0' as Int; // Initialize integer value
+                    // Process subsequent digits
+                    while let Some(c) = self.src[self.p..].chars().next() {
+                        if c.is_digit(10) {
+                            self.ival = self.ival * 10 + (c as Int - '0' as Int);
+                            self.p += c.len_utf8();
+                        } else { break; }
+                    }
+                    Token::Num // Return number token
+                }
+                // Handle division or line comments
+                '/' => {
+                    if self.src[self.p..].starts_with('/') {
+                        self.p += 1; // Skip second '/'
+                        // Skip until newline for line comment
+                        while self.p < self.src.len() && self.src[self.p..].chars().next() != Some('\n') {
+                            self.p += 1;
+                        }
+                        continue;
+                    }
+                    Token::Div // Return division token
+                }
+                // Handle string or character literals
+                '\'' | '"' => {
+                    let quote = ch; // Store quote type
+                    let pp = self.data.len(); // Mark data buffer position
+                    // Process characters within quotes
+                    while let Some(c) = self.src[self.p..].chars().next() {
+                        if c == quote { break; }
+                        self.p += c.len_utf8();
+                        if c == '\\' { // Handle escape sequences
+                            if let Some(next) = self.src[self.p..].chars().next() {
+                                self.p += next.len_utf8();
+                                self.ival = if next == 'n' { '\n' as Int } else { next as Int };
+                            }
+                        } else {
+                            self.ival = c as Int;
+                        }
+                        if quote == '"' { self.data.push(self.ival as u8); } // Store string data
+                    }
+                    self.p += 1; // Skip closing quote
+                    if quote == '"' { self.ival = pp as Int; Token::Num } else { Token::Num } // Return number token
+                }
+                 // Handle operators and punctuation
+                '=' => if self.src[self.p..].starts_with("=") { self.p += 1; Token::Eq } else { Token::Assign },
+                '+' => if self.src[self.p..].starts_with("+") { self.p += 1; Token::Inc } else { Token::Add },
+                '-' => if self.src[self.p..].starts_with("-") { self.p += 1; Token::Dec } else { Token::Sub },
+                '!' => if self.src[self.p..].starts_with("=") { self.p += 1; Token::Ne } else { continue },
+                '<' => {
+                    if self.src[self.p..].starts_with("=") { self.p += 1; Token::Le }
+                    else if self.src[self.p..].starts_with("<") { self.p += 1; Token::Shl }
+                    else { Token::Lt }
+                }
+                '>' => {
+                    if self.src[self.p..].starts_with("=") { self.p += 1; Token::Ge }
+                    else if self.src[self.p..].starts_with(">") { self.p += 1; Token::Shr }
+                    else { Token::Gt }
+                }
+                '|' => if self.src[self.p..].starts_with("|") { self.p += 1; Token::Lor } else { Token::Or },
+                '&' => if self.src[self.p..].starts_with("&") { self.p += 1; Token::Lan } else { Token::And },
+                '^' => Token::Xor,
+                '%' => Token::Mod,
+                '*' => Token::Mul,
+                '[' => Token::Brak,
+                '?' => Token::Cond,
+                ';' => Token::Semicolon,
+                '{' => Token::CurlyOpen,
+                '}' => Token::CurlyClose,
+                ',' => Token::Comma,
+                _ => continue, // Skip unrecognized characters
+            });
+            return; // Return after setting token
+        }
+        self.tk = None; // Set token to None if end of source is reached
+    }
+/// Parses and compiles an expression with a given precedence level.
+    /// Generates intermediate code for the expression and updates the compiler state.
+    ///
+    /// # Arguments
+    /// * `lev` - The precedence level (`Token`) determining operator binding.
+
+    fn expr(&mut self, lev: Token) {  // Match on the current token to handle the start of the expression
+        match self.tk {
+            None => panic!("{}: unexpected eof in expression", self.line), // Handle end-of-file error
+            Some(Token::Num) => {
+                // Handle numeric literals
+                self.e.push(Opcode::IMM as Int); // Push immediate value opcode
+                self.e.push(self.ival); // Push the numeric value
+                self.next(); // Advance to next token
+                self.ty = Type::INT; // Set type to integer
+            }
+            Some(Token::Id) => {
+                // Handle identifiers (variables, arrays, etc.)
+                let id_idx = self.sym.iter().position(|id| id.tk == Token::Id && id.name == self.src[self.p - 1..self.p]);
+                let id = self.sym[id_idx.unwrap_or_else(|| panic!("{}: undefined identifier", self.line))].clone(); // Find and clone identifier
+                self.next(); // Advance to next token
+
+                if self.tk == Some(Token::Brak) {
+                    // Handle array indexing (e.g., `arr[i]`)
+                    self.next(); // Skip opening bracket
+                    self.e.push(Opcode::PSH as Int); // Push current value for later use
+                    self.expr(Token::Assign); // Parse index expression
+                    if self.tk != Some(Token::Brak) {
+                        panic!("{}: close bracket expected", self.line); // Ensure closing bracket
+                    }
+                    self.next(); // Skip closing bracket
+
+                    // Handle pointer arithmetic for array access 
+                    if (id.ty as Int) > (Type::PTR as Int) {
+                        self.e.push(Opcode::PSH as Int); // Push size for multiplication
+                        self.e.push(std::mem::size_of::<Int>() as Int);
+                        self.e.push(Opcode::MUL as Int); // Multiply index by element size
+                    } else if (id.ty as Int) < (Type::PTR as Int) {
+                        panic!("{}: pointer type expected", self.line); // Ensure pointer type
+                    }
+                    self.e.push(Opcode::ADD as Int); // Add base address and offset
+                    self.ty = match id.ty {
+                        Type::CHAR => {
+                            self.e.push(Opcode::LC as Int); // Load character
+                            Type::CHAR
+                        }
+                        _ => {
+                            self.e.push(Opcode::LI as Int); // Load integer
+                            Type::INT
+                        }
+                    };
+                } else if id.class == Token::Num {
+                    // Handle constant identifiers
+                    self.e.push(Opcode::IMM as Int); // Push immediate value opcode
+                    self.e.push(id.val); // Push constant value
+                    self.ty = Type::INT; // Set type to integer
+                } else {
+                    // Handle variables (local or global)
+                    if id.class == Token::Loc {
+                        self.e.push(Opcode::LEA as Int); // Load effective address for local variable
+                        self.e.push(self.loc - id.val); // Compute relative offset
+                    } else if id.class == Token::Glo {
+                        self.e.push(Opcode::IMM as Int); // Push immediate value for global variable
+                        self.e.push(id.val); // Push global variable address
+                    } else {
+                        panic!("{}: undefined variable", self.line); // Handle undefined variable
+                    }
+                    self.ty = id.ty; // Set type from identifier
+                    self.e.push(if self.ty == Type::CHAR { Opcode::LC as Int } else { Opcode::LI as Int }); // Load value based on type
+                }
+            }
+            _ => panic!("{}: bad expression", self.line), // Handle invalid expression start
+        }
+       // Process operators with precedence >= lev
+        while self.tk.map_or(false, |t| t as Int >= lev as Int) {
+            let t = self.ty; // Save current type
+            match self.tk { 
+                Some(Token::Assign) => { // Handle assignment operator
+                    self.next(); // Skip assignment token
+                    // Check if last operation was a load (LC or LI)
+                    if *self.e.last().unwrap() == Opcode::LC as Int || *self.e.last().unwrap() == Opcode::LI as Int {
+                        *self.e.last_mut().unwrap() = Opcode::PSH as Int; // Convert load to push
+                    } else {
+                        panic!("{}: bad lvalue in assignment", self.line); // Ensure valid lvalue
+                    }
+                    self.expr(Token::Assign); // Parse right-hand side expression
+                    self.e.push(if t == Type::CHAR { Opcode::SC as Int } else { Opcode::SI as Int }); // Store value based on type
+                    self.ty = t;// Restore type
+                }
+                Some(Token::Add) => {
+                    // Handle addition operator
+                    self.next(); // Skip add token
+                    self.e.push(Opcode::PSH as Int); // Push left operand
+                    self.expr(Token::Add); // Parse right-hand side
+                    self.e.push(Opcode::ADD as Int);// Add operands
+                    self.ty = t;// Restore type
+                }
+                Some(Token::Sub) => {
+                    // Handle subtraction operator
+                    self.next();  // Skip subtract token
+                    self.e.push(Opcode::PSH as Int); // Push left operand
+                    self.expr(Token::Sub); // Parse right-hand side
+                    self.e.push(Opcode::SUB as Int); // Subtract operands
+                    self.ty = t; // Restore type
+                }
+                _ => break, // Exit if no matching operator
+            }
+        }
+    }
 
     fn stmt(&mut self) {
         // wen parse a single statement in the source code, like an if, while, or assignment and it checks the current token to decide what kind of statement it is
